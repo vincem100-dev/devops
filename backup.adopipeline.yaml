@@ -1,0 +1,165 @@
+trigger: none
+
+schedules:
+  - cron: "0 0 * * *"
+    displayName: Daily midnight backup
+    branches:
+      include:
+        - main
+    always: true
+
+pool:
+  name: "depot-$(SubscriptionName)"
+
+stages:
+  - stage: backup
+    jobs:
+      ### Backing up Git
+      - job: git_backup
+        displayName: Backup Git Repositories
+        steps:
+          - checkout: self
+            fetchDepth: 1
+            fetchTags: false
+          - task: Bash@3
+            displayName: "Install PowerShell"
+            inputs:
+              targetType: "inline"
+              script: |
+                { # try
+                  which powershell
+                } || { # catch
+                  # Register the Microsoft RedHat repository
+                  curl https://packages.microsoft.com/config/rhel/8/prod.repo | sudo tee /etc/yum.repos.d/microsoft.repo
+
+                  # Install PowerShell
+                  sudo dnf install --assumeyes powershell
+                  pwsh --version 
+                }
+          - pwsh: |
+              if (Get-Module -ListAvailable -Name Az) {
+                  Write-Host "Module Az exists"
+              } 
+              else {
+                  Write-Host "Install module az"
+                  Install-Module -Name Az -Force
+              }
+          - task: AzureCLI@2
+            displayName: Get AZDO Backup Git Token
+            inputs:
+              azureSubscription: $(GitBackupServiceConnection)
+              scriptType: pscore
+              scriptLocation: inlineScript
+              inlineScript: |
+                $ErrorActionPreference = 'Stop'
+                $InformationPreference = 'Continue'
+
+                Write-Information "Retrieving access token for ADO backup process"
+                $devopsToken = az account get-access-token --resource "499b84ac-1321-427f-aa17-267ca6975798" --query accessToken --output tsv
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Failed to retrieve backup access token from Backup Service Connection."
+                }
+                Write-Host "##vso[task.setvariable variable=AZDO_BACKUP_PIPELINE_RUN_ACCESS_TOKEN]$devopsToken"
+          - task: AzureCLI@2
+            displayName: Create Git Backup Container
+            inputs:
+              azureSubscription: "$(GitBackupServiceConnection)"
+              scriptType: pscore
+              scriptLocation: scriptPath
+              scriptPath: intl-depot/pipelines/backup-create-storage-container.ps1
+              arguments: -StorageAccountName $(GitBackupStorageAccountName) -ContainerName $(GitBackupStorageContainerName)
+          - task: AzureCLI@2
+            displayName: "Backup Git"
+            inputs:
+              azureSubscription: "$(GitBackupServiceConnection)"
+              scriptType: pscore
+              scriptLocation: scriptPath
+              scriptPath: intl-depot/pipelines/backup-git.ps1
+              arguments: -SubscriptionName $(SubscriptionName) -StorageAccountName $(GitBackupStorageAccountName) -AccessToken $(AZDO_BACKUP_PIPELINE_RUN_ACCESS_TOKEN)
+              powerShellErrorActionPreference: "continue"
+          - task: PowerShell@2
+            continueOnError: true
+            displayName: Clean-up Local Backup Directory
+            inputs:
+              targetType: inline
+              script: |
+                $currentPath = $(Get-Location)
+                $backupFolder = "$currentPath/Backup"
+                Write-Host "Removing backup folder: $backupFolder"
+
+                if (Test-Path $backupFolder) {
+                    Remove-Item $backupFolder -recurse -force -ErrorAction SilentlyContinue | Out-Null
+                }
+
+                if (Test-Path $backupFolder) {            
+                    Write-Host "Fail to remove $backupFolder"
+                } else {             
+                    Write-Host "Removed $backupFolder"        
+                }
+
+      ### Backing up KeyVault
+      - job: keyvault_backup
+        displayName: Backup KeyVaults
+        steps:
+          - checkout: self
+            fetchDepth: 1
+            fetchTags: false
+          - task: Bash@3
+            displayName: "Install PowerShell"
+            inputs:
+              targetType: "inline"
+              script: |
+                { # try
+                  which powershell
+                } || { # catch
+                  # Register the Microsoft RedHat repository
+                  curl https://packages.microsoft.com/config/rhel/8/prod.repo | sudo tee /etc/yum.repos.d/microsoft.repo
+
+                  # Install PowerShell
+                  sudo dnf install --assumeyes powershell
+                  pwsh --version 
+                }
+          - pwsh: |
+              if (Get-Module -ListAvailable -Name Az) {
+                  Write-Host "Module Az exists"
+              } 
+              else {
+                  Write-Host "Install module az"
+                  Install-Module -Name Az -Force
+              }
+          - task: AzureCLI@2
+            displayName: Create Git Backup Container
+            inputs:
+              azureSubscription: "$(KeyVaultBackupServiceConnection)"
+              scriptType: pscore
+              scriptLocation: scriptPath
+              scriptPath: intl-depot/pipelines/backup-create-storage-container.ps1
+              arguments: -StorageAccountName $(KeyVaultBackupStorageAccountName) -ContainerName $(KeyVaultBackupStorageContainerName)
+          - task: AzureCLI@2
+            displayName: "Backup KeyVault"
+            inputs:
+              azureSubscription: "$(KeyVaultBackupServiceConnection)"
+              scriptType: pscore
+              scriptLocation: scriptPath
+              scriptPath: intl-depot/pipelines/backup-keyvault.ps1
+              arguments: -SubscriptionName $(SubscriptionName) -StorageAccountName $(KeyVaultBackupStorageAccountName)
+              powerShellErrorActionPreference: "continue"
+          - task: PowerShell@2
+            continueOnError: true
+            displayName: Clean-up Local Backup Directory
+            inputs:
+              targetType: inline
+              script: |
+                $currentPath = $(Get-Location)
+                $backupFolder = "$currentPath/Backup"
+                Write-Host "Removing backup folder: $backupFolder"
+
+                if (Test-Path $backupFolder) {
+                    Remove-Item $backupFolder -recurse -force -ErrorAction SilentlyContinue | Out-Null
+                }
+
+                if (Test-Path $backupFolder) {            
+                    Write-Host "Fail to remove $backupFolder"
+                } else {             
+                    Write-Host "Removed $backupFolder"        
+                }
